@@ -1,11 +1,9 @@
 """
-Rejseplanen API Demo and Visualization
+Rejseplanen API Demo and Visualization with Plustur Support
 """
 
 import matplotlib.pyplot as plt
-import numpy as np
-from datetime import datetime
-from typing import List, Dict, Optional
+from typing import List
 from main import (
     RejseplanenAPI, 
     LocationType, 
@@ -13,13 +11,12 @@ from main import (
     TransportMode, 
     Trip, 
     CommonData,
-    TransportRequestType
 )
 
 
 def plot_trips(trips: List[Trip], common_data: CommonData, max_trips: int = 3):
     """
-    Visualize trips using matplotlib with proper walking route support
+    Visualize trips using matplotlib with proper walking route and Plustur support
     """
     n_trips = min(len(trips), max_trips)
     if n_trips == 0:
@@ -39,14 +36,46 @@ def plot_trips(trips: List[Trip], common_data: CommonData, max_trips: int = 3):
         title += f"Changes: {trip.changes}"
         if trip.service_days and trip.service_days.regular:
             title += f"\n{trip.service_days.regular}"
+        
+        # Check for Plustur
+        has_plustur = any(s.type == TransportMode.TETA for s in trip.sections)
+        if has_plustur:
+            title += "\n⚠️ Plustur (Book 2h ahead)"
+        
         ax.set_title(title)
         
         all_coords = []
-        legend_added = {'walking': False, 'transit': False}
+        legend_added = {'walking': False, 'transit': False, 'plustur': False}
         
         for section in trip.sections:
+            # Handle TETA (Plustur) sections
+            if section.type == TransportMode.TETA and section.journey:
+                if section.journey.polyline_indices:
+                    for poly_idx in section.journey.polyline_indices:
+                        if poly_idx in common_data.polylines:
+                            polyline = common_data.polylines[poly_idx]
+                            if polyline.coordinates:
+                                lats = [c.lat for c in polyline.coordinates]
+                                lons = [c.lon for c in polyline.coordinates]
+                                all_coords.extend(polyline.coordinates)
+                                
+                                # Purple dashed line for Plustur
+                                label = 'Plustur (Dial-a-ride)' if not legend_added['plustur'] else None
+                                ax.plot(lons, lats, color='#8B3A8B', linestyle='--', 
+                                       linewidth=2.5, alpha=0.8, label=label)
+                                legend_added['plustur'] = True
+                                
+                                # Add booking notice
+                                if section.call_ahead_service and len(lons) > 1:
+                                    mid_idx = len(lons) // 2
+                                    ax.annotate('Book 2h ahead', 
+                                              xy=(lons[mid_idx], lats[mid_idx]),
+                                              fontsize=7, color='purple',
+                                              bbox=dict(boxstyle='round,pad=0.3', 
+                                                      facecolor='yellow', alpha=0.7))
+            
             # Handle journey sections (train/bus/metro)
-            if section.journey and section.journey.polyline_indices:
+            elif section.journey and section.journey.polyline_indices:
                 for poly_idx in section.journey.polyline_indices:
                     if poly_idx in common_data.polylines:
                         polyline = common_data.polylines[poly_idx]
@@ -61,7 +90,11 @@ def plot_trips(trips: List[Trip], common_data: CommonData, max_trips: int = 3):
                             if section.journey.product_index is not None:
                                 prod = common_data.products.get(section.journey.product_index)
                                 if prod:
-                                    if 'Metro' in prod.name:
+                                    if 'Plustur' in prod.name:
+                                        color = '#8B3A8B'  # Purple for Plustur
+                                        label = 'Plustur' if not legend_added['plustur'] else None
+                                        legend_added['plustur'] = True
+                                    elif 'Metro' in prod.name:
                                         if 'M1' in prod.name:
                                             color = '#00A84F'  # Green for M1
                                         else:
@@ -71,7 +104,7 @@ def plot_trips(trips: List[Trip], common_data: CommonData, max_trips: int = 3):
                                         color = '#F68B1F'  # Orange for S-train
                                         label = prod.name
                                     elif 'Bus' in str(prod.category_out):
-                                        color = '#FDB913'  # Yellow for bus
+                                        color = '#76B82A'  # Green for bus
                                         label = prod.name
                                     else:
                                         label = 'Transit' if not legend_added['transit'] else None
@@ -213,6 +246,13 @@ def print_trip_summary(trip: Trip, common_data: CommonData):
             has_poly = bool(section.gis and (section.gis.polyline or 
                           section.gis.ctx in common_data.walking_polylines))
             print(f"    • Walk {dist}m {'(GPS route)' if has_poly else '(straight line)'}")
+        elif section.type == TransportMode.TETA:
+            if section.journey and section.journey.product_index is not None:
+                prod = common_data.products.get(section.journey.product_index)
+                if prod:
+                    print(f"    • {prod.name} 📞 (Book 2h ahead)")
+            else:
+                print(f"    • Plustur 📞 (Book 2h ahead)")
         elif section.journey and section.journey.product_index is not None:
             prod = common_data.products.get(section.journey.product_index)
             if prod:
@@ -221,14 +261,14 @@ def print_trip_summary(trip: Trip, common_data: CommonData):
 
 def main():
     """Main demo function"""
-    print("=== Rejseplanen Complete API Demo ===\n")
+    print("=== Rejseplanen Complete API Demo (with Plustur) ===\n")
     
     # Initialize API with auto-fetching of walking routes
     api = RejseplanenAPI(debug=False, auto_fetch_walking=True)
     
     # Test location search
     print("1. Testing location search...")
-    test_location = "Flintholm"
+    test_location = "Odense St."
     locations = api.search_location(test_location, LocationType.STATION)
     print(f"Found {len(locations)} locations for '{test_location}':")
     for loc in locations[:3]:
@@ -236,14 +276,17 @@ def main():
     
     # Test trip planning with all features
     print("\n2. Testing comprehensive trip planning...")
-    origin = input("Enter origin (default: Nørreport): ").strip() or "Nørreport"
-    destination = input("Enter destination (default: Flintholm): ").strip() or "Flintholm"
+    print("Examples with Plustur: 'Odense St.' -> 'Amager Strand'")
+    print("Regular routes: 'Nørreport' -> 'Flintholm'")
+    
+    origin = input("\nEnter origin (default: Odense St.): ").strip() or "Odense St."
+    destination = input("Enter destination (default: Amager Strand): ").strip() or "Amager Strand"
     
     print(f"\nSearching for trips from {origin} to {destination}...")
     trips, common_data, full_response = api.plan_trip(
         origin=origin,
         destination=destination,
-        products=ProductClass.ALL,
+        products=ProductClass.ALL | ProductClass.FLEXTUR,  # Include Plustur
         get_polylines=True,
         get_passlist=True,
         get_tariff=True,
@@ -254,24 +297,41 @@ def main():
         print(f"\nFound {len(trips)} trips:")
         for i, trip in enumerate(trips[:5], 1):
             print(f"\nTrip {i}:")
+            
+            # Check for Plustur
+            has_plustur = any(s.type == TransportMode.TETA for s in trip.sections)
+            if has_plustur:
+                print("  ⚠️ This trip includes Plustur - booking required!")
+            
             print_trip_summary(trip, common_data)
         
         # Print detailed info for first trip
         if input("\nShow detailed trip info? (y/n): ").lower() == 'y':
             api.print_trip_details(trips[0], common_data)
         
+        # Check for Plustur messages
+        plustur_messages = [msg for msg in common_data.remarks if msg.code == 'teletaxi']
+        if plustur_messages:
+            print("\n3. Plustur Information:")
+            for msg in plustur_messages:
+                print(f"  📞 {msg.text}")
+        
         # Check walking polyline fetching
-        print("\n3. Checking walking route data...")
+        print("\n4. Checking walking route data...")
         walking_count = 0
+        plustur_count = 0
         for trip in trips:
             for section in trip.sections:
                 if section.type == TransportMode.WALK and section.gis:
                     if section.gis.polyline or section.gis.ctx in common_data.walking_polylines:
                         walking_count += 1
+                elif section.type == TransportMode.TETA:
+                    plustur_count += 1
         print(f"Found {walking_count} walking segments with GPS polylines")
+        print(f"Found {plustur_count} Plustur segments")
         
         # Test manual walking detail fetching
-        print("\n4. Testing manual walking route details...")
+        print("\n5. Testing manual walking route details...")
         for trip in trips[:1]:
             for section in trip.sections[:1]:
                 if section.type == TransportMode.WALK and section.gis and section.gis.ctx:
@@ -287,30 +347,31 @@ def main():
         
         # Check for service messages
         if common_data.remarks:
-            print("\n5. Service messages:")
+            print("\n6. Service messages:")
             for msg in common_data.remarks[:5]:
-                print(f"  - [{msg.code}] {msg.text}")
+                text_preview = msg.text[:100] + "..." if msg.text and len(msg.text) > 100 else msg.text or "No text"
+                print(f"  - [{msg.code}] {text_preview}")
         
         # Check connection groups
         if 'outConGrpL' in full_response:
-            print("\n6. Available transport mode groups:")
+            print("\n7. Available transport mode groups:")
             for grp in full_response['outConGrpL']:
                 print(f"  - {grp['name']} ({grp['grpid']})")
         
         # Plot trips
-        print("\n7. Plotting trips with walking routes...")
+        print("\n8. Plotting trips with walking routes and Plustur...")
         fig = plot_trips(trips, common_data)
         if fig:
             plt.show()
             
             # Save plot
-            filename = f'rejseplanen_{origin.lower()}_{destination.lower()}.png'
+            filename = f'rejseplanen_{origin.lower().replace(" ", "_")}_{destination.lower().replace(" ", "_")[:20]}.png'
             fig.savefig(filename, dpi=150, bbox_inches='tight')
             print(f"Plot saved as '{filename}'")
         
         # Test pagination if available
         if full_response.get('outCtxScrF'):
-            if input("\n8. Load more trips? (y/n): ").lower() == 'y':
+            if input("\n9. Load more trips? (y/n): ").lower() == 'y':
                 print("Fetching more trips...")
                 more_trips, more_common = api.scroll_trips(full_response['outCtxScrF'], "F", 3)
                 print(f"Found {len(more_trips)} additional trips")
@@ -321,10 +382,10 @@ def main():
         print("No trips found")
     
     # Test polyline decoding
-    print("\n9. Testing polyline decoder...")
+    print("\n10. Testing polyline decoder...")
     test_polylines = [
-        "kuzrIqyjkAmCzWoD`YqC`^",  # From your data
-        "ykzrIorikA???UFqCJcDP}H@]H_F@a@?YGISOy@k@mBuAsA}@u@g@q@c@Ho@TLB@BW?G@?ADB@B[AA"  # Walking route
+        "c}nqImkm_AseOakK",  # Plustur polyline from your data
+        "ctcqIctk~@?AN?b@CAkABAt@A?yAI?M@A?AiBK@"  # Walking polyline
     ]
     for encoded in test_polylines[:1]:
         decoded = api.decode_polyline(encoded)

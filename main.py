@@ -1,10 +1,8 @@
 """
 RejseplanenAPI - Complete Python wrapper for the Danish Rejseplanen API
-Author: Assistant
-Version: 2.1.0
 License: MIT
 
-Complete implementation with automatic walking route fetching for polylines.
+Complete implementation with Plustur/Flextur (TETA) support and automatic walking route fetching.
 """
 
 import requests
@@ -16,18 +14,19 @@ from enum import Enum, IntFlag
 
 
 # ============================================================================
-# ENUMS AND FLAGS (keeping all from before)
+# ENUMS AND FLAGS
 # ============================================================================
 
 class TransportMode(Enum):
     """Transport mode types"""
     WALK = "WALK"
-    JNY = "JNY"  # Journey (train/bus/metro)
+    JNY = "JNY"   # Journey (train/bus/metro)
     BIKE = "BIKE"
     CAR = "CAR"
     TAXI = "TAXI"
     KISS = "KISS"  # Kiss & Ride
     PARK = "PARK"  # Park & Ride
+    TETA = "TETA"  # Teletaxi/Plustur (dial-a-ride service)
 
 
 class LocationType(Enum):
@@ -50,6 +49,7 @@ class ProductClass(IntFlag):
     BOAT = 64                # Boat
     SUBWAY = 128             # U-Bahn
     TRAM = 256               # Tram
+    FLEXTUR = 256            # Flexible transport/Plustur
     TAXI = 512               # Taxi
     ALL = 4095               # All products
 
@@ -84,6 +84,7 @@ class MessageCode(Enum):
     FR = "FR"  # Free (e.g., free bike transport)
     FB = "FB"  # Bicycle restrictions
     DELAY = "390"  # Delay information
+    TELETAXI = "teletaxi"  # Plustur/Flextur booking required
 
 
 class ScoringType(Enum):
@@ -420,6 +421,9 @@ class TripSection:
     gis: Optional[GisInfo] = None
     polyline_indices: List[int] = field(default_factory=list)
     messages: List[ServiceMessage] = field(default_factory=list)
+    call_ahead_service: bool = False  # For Plustur
+    booking_required: bool = False
+    booking_deadline_minutes: Optional[int] = None
 
 
 @dataclass
@@ -506,7 +510,8 @@ class RejseplanenAPI:
     """
     Complete API wrapper for Rejseplanen (Danish Journey Planner)
     
-    This class provides comprehensive access to all Rejseplanen API features.
+    This class provides comprehensive access to all Rejseplanen API features,
+    including Plustur/Flextur (dial-a-ride) services.
     """
     
     def __init__(self, debug: bool = False, language: str = "dan", auto_fetch_walking: bool = True):
@@ -1126,6 +1131,12 @@ class RejseplanenAPI:
                     arrival=sec_data.get('arr')
                 )
                 
+                # Check for call-ahead service flag (Plustur)
+                if section.departure and 'dCaS' in section.departure:
+                    section.call_ahead_service = section.departure['dCaS']
+                    section.booking_required = True
+                    section.booking_deadline_minutes = 120  # Default 2 hours for Plustur
+                
                 # Handle walking sections
                 if section.type == TransportMode.WALK and 'gis' in sec_data:
                     gis_data = sec_data['gis']
@@ -1136,7 +1147,31 @@ class RejseplanenAPI:
                         provider=gis_data.get('gisPrvr', 'E')
                     )
                 
-                # Handle journey sections
+                # Handle TETA (Plustur/dial-a-ride) sections
+                elif section.type == TransportMode.TETA and 'jny' in sec_data:
+                    jny_data = sec_data['jny']
+                    section.journey = Journey(
+                        jid=jny_data.get('jid', ''),
+                        date=jny_data.get('date', ''),
+                        product_index=jny_data.get('prodX'),
+                        direction_text=jny_data.get('dirTxt'),
+                        direction_flag=jny_data.get('dirFlg'),
+                        status=jny_data.get('status'),
+                        is_reachable=jny_data.get('isRchbl', True),
+                        subscription=jny_data.get('subscr', 'N'),
+                        ctx_recon=jny_data.get('ctxRecon')
+                    )
+                    
+                    # Get polyline indices for Plustur route
+                    if 'polyG' in jny_data and 'polyXL' in jny_data['polyG']:
+                        section.journey.polyline_indices = jny_data['polyG']['polyXL']
+                    
+                    # Parse journey messages
+                    if 'msgL' in jny_data:
+                        for msg_data in jny_data['msgL']:
+                            section.journey.messages.append(ServiceMessage.from_api(msg_data))
+                
+                # Handle journey sections (train/bus/metro)
                 elif section.type == TransportMode.JNY and 'jny' in sec_data:
                     jny_data = sec_data['jny']
                     section.journey = Journey(
@@ -1236,6 +1271,13 @@ class RejseplanenAPI:
         for i, section in enumerate(trip.sections, 1):
             print(f"\n  {i}. {section.type.value}")
             
+            # Special handling for Plustur
+            if section.type == TransportMode.TETA:
+                print(f"     ⚠️ PLUSTUR - Dial-a-ride service")
+                if section.call_ahead_service:
+                    print(f"     📞 Booking required: Min. 2 hours before departure")
+                    print(f"     ⏰ Times are approximate - exact times given when booking")
+            
             # Get location names
             if section.departure and 'locX' in section.departure:
                 loc = common_data.locations.get(section.departure['locX'])
@@ -1269,3 +1311,20 @@ class RejseplanenAPI:
                 
                 if section.journey.direction_text:
                     print(f"     Direction: {section.journey.direction_text}")
+                
+                if section.journey.polyline_indices:
+                    total_points = sum(len(common_data.polylines[idx].coordinates) 
+                                     for idx in section.journey.polyline_indices 
+                                     if idx in common_data.polylines)
+                    if total_points > 0:
+                        print(f"     GPS points: {total_points}")
+        
+        if trip.tariff_result and trip.tariff_result.external_content:
+            print(f"\nFare Info: {trip.tariff_result.external_content.get('text', 'Available')}")
+        
+        for msg in trip.messages:
+            if msg.text:
+                if msg.code == 'teletaxi':
+                    print(f"\n📞 {msg.text}")
+                else:
+                    print(f"\n⚠ {msg.text}")
